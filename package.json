@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/bot.js",
+    "start": "ts-node src/bot.ts",
     "dev": "concurrently -n bot,whisper -c cyan,yellow \"ts-node src/bot.ts\" \"python transcribe.py\""
   },
   "dependencies": {

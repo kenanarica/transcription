@@ -6,3 +6,6 @@ venv/
 dnd_agent.7z
 __pycache__/*
 node_modules/*
+benchmark
+benchmark_results
+vocabulary.json

@@ -44,6 +44,10 @@ HF_TOKEN          = os.getenv("HF_TOKEN", "")
 DEVICE            = "cuda" if torch.cuda.is_available() else "cpu"
 COMPUTE_TYPE      = "float16" if DEVICE == "cuda" else "int8"
 FP16              = DEVICE == "cuda"
+# ctranslate2 (faster-whisper backend) has no ROCm support — force CPU for it.
+# PyTorch models (openai-whisper, alignment, diarization) still use GPU via ROCm.
+CT2_DEVICE        = "cpu"
+CT2_COMPUTE_TYPE  = "int8"
 
 # Inject ffmpeg directory if FFMPEG_PATH is set
 ffmpeg_path = os.getenv("FFMPEG_PATH")
@@ -81,7 +85,7 @@ except ImportError:
 
 # whisperX (faster-whisper) — used for diarization path (diarize=true).
 print(f"[transcribe] Loading whisperX '{WHISPERX_MODEL}' on {DEVICE} ({COMPUTE_TYPE})...", flush=True)
-whisperx_model = whisperx.load_model(WHISPERX_MODEL, DEVICE, compute_type=COMPUTE_TYPE, language="en")
+whisperx_model = whisperx.load_model(WHISPERX_MODEL, CT2_DEVICE, compute_type=CT2_COMPUTE_TYPE, language="en")
 
 print("[transcribe] Loading alignment model (en)...", flush=True)
 align_model, align_metadata = whisperx.load_align_model(language_code="en", device=DEVICE)
@@ -89,7 +93,7 @@ align_model, align_metadata = whisperx.load_align_model(language_code="en", devi
 diarize_model = None
 if HF_TOKEN:
     print("[transcribe] Loading diarization pipeline...", flush=True)
-    diarize_model = DiarizationPipeline(use_auth_token=HF_TOKEN, device=DEVICE)
+    diarize_model = DiarizationPipeline(token=HF_TOKEN, device=DEVICE)
     print("[transcribe] Diarization enabled.", flush=True)
 else:
     print("[transcribe] HF_TOKEN not set — diarization disabled.", flush=True)
@@ -197,17 +201,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def _transcribe_with_diarization(self, fname: str):
         """Full whisperX pipeline: transcribe → align → diarize."""
-        # Transcription via faster-whisper
         t0 = time.perf_counter()
-        segments_gen, info = whisperx_model.model.transcribe(
-            fname,
-            language="en",
-            initial_prompt=initial_prompt,
-            beam_size=1,
-        )
-        segments = [{"start": s.start, "end": s.end, "text": s.text}
-                    for s in segments_gen]
-        result = {"segments": segments, "language": info.language}
+        if plain_model is not None:
+            # Use openai-whisper (PyTorch) for GPU transcription via ROCm
+            raw = plain_model.transcribe(
+                fname,
+                language="en",
+                initial_prompt=initial_prompt,
+                fp16=FP16,
+            )
+            segments = [{"start": s["start"], "end": s["end"], "text": s["text"]}
+                        for s in raw["segments"]]
+            result = {"segments": segments, "language": raw["language"]}
+        else:
+            # Fallback: faster-whisper on CPU
+            segments_gen, info = whisperx_model.model.transcribe(
+                fname,
+                language="en",
+                initial_prompt=initial_prompt,
+                beam_size=1,
+            )
+            segments = [{"start": s.start, "end": s.end, "text": s.text}
+                        for s in segments_gen]
+            result = {"segments": segments, "language": info.language}
         print(f"[transcribe] transcription: {time.perf_counter()-t0:.2f}s", flush=True)
 
         if not result.get("segments"):
